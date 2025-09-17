@@ -1,0 +1,84 @@
+<mujoco model="one_leg_mujoco.SLDASM">
+  <compiler angle="radian"/>
+    <option timestep="0.001" integrator="RK4" gravity="0 0 -9.81"/>
+
+  <asset>
+    <mesh name="base_link" file="base_link.STL"/>
+    <mesh name="link1"     file="link1.STL"/>
+    <mesh name="link2"     file="link2.STL"/>
+  </asset>
+
+  <!-- 링크들끼리만 충돌 제외 (ground와는 충돌 허용) -->
+  <contact>
+    <exclude body1="base_link" body2="link1"/>
+    <exclude body1="base_link" body2="link2"/>
+    <exclude body1="link1"     body2="link2"/>
+  </contact>
+
+
+  
+  <worldbody>
+
+
+    <!-- 베이스: z축 슬라이드(수직 이동만) -->
+    <body name="base_link" pos="0 0 0">
+      <joint name="z_base" type="slide" axis="0 0 1"
+             limited="false" damping="2"/>
+      <geom type="mesh" mesh="base_link" rgba="0.75 0.75 0.75 1"/>
+      <site name="imu" pos="0. 0 0" size="0.01" rgba="1 0 0 1"/>
+      
+      <!-- link1 (hip) -->
+      <body name="link1">
+        <inertial pos="-0.03933 0.000054848 -0.0046776"
+                  quat="-0.000931991 0.705259 -0.00147268 0.708948"
+                  mass="0.76733"
+                  diaginertia="0.00540914 0.005403 0.000231856"/>
+        <joint name="q1" type="hinge" pos="0 0 0" axis="0 -1 0"
+               limited="true" range="-3.14 3.14" damping="0.1"/>
+        <geom type="mesh" mesh="link1" rgba="0.75 0.75 0.75 1"/>
+
+        <!-- link2 (knee) -->
+        <body name="link2" pos="-0.25 0 0">
+          <inertial pos="-0.069451 0.000045096 0.0097666"
+                    quat="0.501427 0.498766 0.498614 0.501186"
+                    mass="0.25696"
+                    diaginertia="0.002621 0.00256207 0.0000779316"/>
+          <joint name="q2" type="hinge" pos="0 0 0" axis="0 -1 0"
+                 limited="true" range="-3.14 3.14" damping="0.1"/>
+
+          <!-- link2 메쉬 (참고: 이건 충돌 가능하지만 발끝은 아래 foot_tip으로 다룸) -->
+          <geom name="link2_mesh" type="mesh" mesh="link2" rgba="0.75 0.75 0.75 1"
+                friction="1.5 0.01 0.002"/>
+
+          <site name="foot" pos="-0.25 0 0" size="0.02" rgba="1 0 0 1"/>
+          <geom name="foot_tip" type="sphere" pos="-0.25 0 0" size="0.020"
+                rgba="0 1 0 1" friction="2.5 0.01 0.002"/>
+
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <!-- q1, q2 토크 모터 (d->ctrl[0], d->ctrl[1]과 매핑) -->
+  <actuator>
+    <motor name="motor_q1" joint="q1" gear="1"
+           ctrllimited="true" ctrlrange="-60 60"/>
+    <motor name="motor_q2" joint="q2" gear="1"
+           ctrllimited="true" ctrlrange="-60 60"/>
+  </actuator>
+
+
+  <sensor>
+    <!-- IMU (torso_front) -->
+    <framelinvel  name="trunk_vel"  objtype="site" objname="imu" />
+    <gyro          site="imu" name="imu_gyro"/>
+    <accelerometer site="imu" name="imu_accl"/>
+    
+
+    <!-- Force Sensor -->
+    <force site="foot"  name="foot_force"/>
+
+
+  </sensor>
+
+</mujoco>
