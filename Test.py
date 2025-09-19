@@ -24,11 +24,10 @@ def test_trained_model_manual_camera(model_path):
         glfw.terminate()
         raise RuntimeError("Failed to create GLFW window")
     glfw.make_context_current(window)
-    glfw.swap_interval(1)
+    glfw.swap_interval(0)
 
     paused = False
 
-    # 먼저 카메라 및 렌더 관련 객체 생성 (콜백 함수들에서 사용하기 위해 미리 선언)
     cam = mujoco.MjvCamera()
     opt = mujoco.MjvOption()
     scene = mujoco.MjvScene(env.model, maxgeom=1000)
@@ -156,6 +155,6 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         model_name = sys.argv[1]
     else:
-        model_name = "ppo_admittance"  # 기본 모델 이름
+        model_name = "PPO_50000_steps.zip"  # 기본 모델 이름
     model_path = os.path.join("models", model_name)
     test_trained_model_manual_camera(model_path)
