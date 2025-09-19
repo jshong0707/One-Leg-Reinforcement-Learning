@@ -1,160 +1,139 @@
 #!/usr/bin/env python
-import os
-os.environ["MUJOCO_GL"] = "glfw"  # GLFW 백엔드 사용
-
-import sys
-import glfw
-import OpenGL.GL as gl
+import os, sys
 import numpy as np
 import mujoco
+import mujoco.viewer
 from Env import OneLegEnv
 from stable_baselines3 import PPO
 
-def test_trained_model_manual_camera(model_path):
+import matplotlib
+matplotlib.use("Agg")  # GUI 없이 파일 저장
+import matplotlib.pyplot as plt
+import scipy.io as sio  # MATLAB .mat 저장
+
+# ----------------- 플로팅 함수 -----------------
+def plot_params(time, wn, zeta, kval, Fz, z_body, zd_body,
+                out_path="params_timeseries.png"):
+    fig, axs = plt.subplots(6, 1, figsize=(10, 12), sharex=True)
+    axs[0].plot(time, wn);      axs[0].set_ylabel(r"$\omega_n$ [rad/s]")
+    axs[1].plot(time, zeta);    axs[1].set_ylabel(r"$\zeta$")
+    axs[2].plot(time, kval);    axs[2].set_ylabel(r"$k$")
+    axs[3].plot(time, Fz);      axs[3].set_ylabel(r"$F_z$")
+    axs[4].plot(time, zd_body); axs[4].set_ylabel(r"$\dot{z}_{body}$")
+    axs[5].plot(time, z_body);  axs[5].set_ylabel(r"$z_{body}$")
+    axs[5].set_xlabel("time [s]")
+    for ax in axs: ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+def plot_ee(time, xdot, zdot, x, z, out_path="ee_timeseries.png"):
+    fig, axs = plt.subplots(4, 1, figsize=(10, 8), sharex=True)
+    axs[0].plot(time, xdot);  axs[0].set_ylabel(r"$\dot{x}$")
+    axs[1].plot(time, zdot);  axs[1].set_ylabel(r"$\dot{z}$")
+    axs[2].plot(time, x);     axs[2].set_ylabel(r"$x$")
+    axs[3].plot(time, z);     axs[3].set_ylabel(r"$z$")
+    axs[3].set_xlabel("time [s]")
+    for ax in axs: ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+# ----------------- 실행 -----------------
+def run(model_name: str):
+    # 모델 경로 자동 처리 (models/ 접두사, .zip 확장자 보정)
+    model_path = model_name
+    if not os.path.exists(model_path):
+        model_path = os.path.join("models", model_name)
+    if not os.path.exists(model_path):
+        if not model_path.endswith(".zip"):
+            model_path += ".zip"
+    print(f"[INFO] load model: {model_path}")
+
     env = OneLegEnv("xml/scene.xml")
     obs, _ = env.reset()
+    agent = PPO.load(model_path, device="cpu")
 
-    # 학습된 모델 로드 (매개변수로 입력된 파일명을 사용)
-    model = PPO.load(model_path)
+    # ctrlbind import (야코비안, fk_pos)
+    _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+    _BUILD_DIR = os.path.join(_THIS_DIR, "build")
+    if _BUILD_DIR not in sys.path:
+        sys.path.append(_BUILD_DIR)
+    import ctrlbind
 
-    if not glfw.init():
-        raise RuntimeError("Failed to initialize GLFW")
-    window = glfw.create_window(1000, 800, "One Leg Reinforcement Learning", None, None)
-    if not window:
-        glfw.terminate()
-        raise RuntimeError("Failed to create GLFW window")
-    glfw.make_context_current(window)
-    glfw.swap_interval(0)
+    # ---- 로그 버퍼 ----
+    t_log = []
+    wn_log, zeta_log, k_log, Fz_log = [], [], [], []
+    x_log, z_log, xdot_log, zdot_log = [], [], [], []
+    z_body_log, zd_body_log = [], []   # 몸통 z, ż
 
-    paused = False
+    try:
+        with mujoco.viewer.launch_passive(env.model, env.data) as viewer:
+            while viewer.is_running():
+                # 정책 → step
+                action, _ = agent.predict(obs, deterministic=True)
+                obs, _, term, trunc, info = env.step(action)
+                if term or trunc:
+                    obs, _ = env.reset()
 
-    cam = mujoco.MjvCamera()
-    opt = mujoco.MjvOption()
-    scene = mujoco.MjvScene(env.model, maxgeom=1000)
-    context = mujoco.MjrContext(env.model, mujoco.mjtFontScale.mjFONTSCALE_150.value)
+                # 시간
+                t_log.append(float(env.data.time))
 
-    # 카메라 기본 설정
-    cam.azimuth = 90      # 초기 회전 각
-    cam.elevation = -20   # 초기 각도
-    cam.distance = 1.5
-    cam.lookat = np.array([0.0, 0.0, 0.35])  # 초기 lookat 위치
+                # 파라미터/힘
+                wn_log.append(float(info.get("omega_n", np.nan)))
+                zeta_log.append(float(info.get("zeta", np.nan)))
+                k_log.append(float(info.get("k", np.nan)))
+                Fz_log.append(float(info.get("Fz", np.nan)))
 
-    # ----- 마우스 인터랙션 관련 변수 -----
-    left_mouse_pressed = False
-    prev_left_mouse_x = None
-    prev_left_mouse_y = None
+                # EE 위치/속도
+                q0 = float(env.data.qpos[1])
+                q1_abs = float(env.data.qpos[1] + env.data.qpos[2])
+                J = ctrlbind.jacobian(q0, q1_abs, env.ARM_LEN)
+                pos = ctrlbind.fk_pos(q0, q1_abs, env.ARM_LEN)
+                x_log.append(float(pos[0])); z_log.append(float(pos[1]))
+                q0d = float(env.data.qvel[1])
+                q1d_abs = float(env.data.qvel[1] + env.data.qvel[2])
+                xdot, zdot = (J @ np.array([q0d, q1d_abs], dtype=float)).tolist()
+                xdot_log.append(float(xdot)); zdot_log.append(float(zdot))
 
-    right_mouse_pressed = False
-    prev_right_mouse_x = None
-    prev_right_mouse_y = None
+                # 몸통 z, ż (base dof)
+                z_body_log.append(float(env.data.qpos[0]))
+                zd_body_log.append(float(env.data.qvel[0]))
 
-    # 마우스 버튼 콜백
-    def mouse_button_callback(window, button, action, mods):
-        nonlocal left_mouse_pressed, right_mouse_pressed
-        nonlocal prev_left_mouse_x, prev_left_mouse_y
-        nonlocal prev_right_mouse_x, prev_right_mouse_y
-        if button == glfw.MOUSE_BUTTON_LEFT:
-            if action == glfw.PRESS:
-                left_mouse_pressed = True
-                prev_left_mouse_x, prev_left_mouse_y = glfw.get_cursor_pos(window)
-            elif action == glfw.RELEASE:
-                left_mouse_pressed = False
-                prev_left_mouse_x, prev_left_mouse_y = None, None
-        elif button == glfw.MOUSE_BUTTON_RIGHT:
-            if action == glfw.PRESS:
-                right_mouse_pressed = True
-                prev_right_mouse_x, prev_right_mouse_y = glfw.get_cursor_pos(window)
-            elif action == glfw.RELEASE:
-                right_mouse_pressed = False
-                prev_right_mouse_x, prev_right_mouse_y = None, None
-    glfw.set_mouse_button_callback(window, mouse_button_callback)
+                viewer.sync()
 
-    # 커서 위치 콜백: 마우스 드래그에 따른 카메라 파라미터 업데이트
-    def cursor_position_callback(window, xpos, ypos):
-        nonlocal left_mouse_pressed, prev_left_mouse_x, prev_left_mouse_y
-        nonlocal right_mouse_pressed, prev_right_mouse_x, prev_right_mouse_y, cam
+    except KeyboardInterrupt:
+        print("Interrupted by user")
 
-        # 좌클릭 드래그: 회전 업데이트
-        if left_mouse_pressed and prev_left_mouse_x is not None and prev_left_mouse_y is not None:
-            dx = xpos - prev_left_mouse_x
-            dy = ypos - prev_left_mouse_y
-            cam.azimuth -= dx * 0.1
-            cam.elevation -= dy * 0.1
-            prev_left_mouse_x, prev_left_mouse_y = xpos, ypos
+    finally:
+        # ---- PNG 저장 ----
+        plot_params(t_log, wn_log, zeta_log, k_log, Fz_log,
+                    z_body_log, zd_body_log,
+                    out_path="params_timeseries.png")
+        plot_ee(t_log, xdot_log, zdot_log, x_log, z_log,
+                out_path="ee_timeseries.png")
+        print("[plot] saved: params_timeseries.png, ee_timeseries.png")
 
-        # 우클릭 드래그: lookat 업데이트 (팬)
-        if right_mouse_pressed and prev_right_mouse_x is not None and prev_right_mouse_y is not None:
-            dx = xpos - prev_right_mouse_x  # 마우스 좌우 이동량
-            dy = ypos - prev_right_mouse_y  # 마우스 상하 이동량
-
-            # 좌우 panning: 현재 카메라 azimuth 기준 좌측 벡터 계산 (up = [0,0,1])
-            horizontal_sensitivity = 0.003
-            theta = np.radians(cam.azimuth)
-            left_vector = np.array([-np.sin(theta), np.cos(theta), 0])
-            cam.lookat[0] += left_vector[0] * dx * horizontal_sensitivity
-            cam.lookat[1] += left_vector[1] * dx * horizontal_sensitivity
-
-            # 상하 panning: lookat의 z (높이) 업데이트
-            vertical_sensitivity = 0.003
-            cam.lookat[2] += dy * vertical_sensitivity
-
-            prev_right_mouse_x, prev_right_mouse_y = xpos, ypos
-
-    glfw.set_cursor_pos_callback(window, cursor_position_callback)
-
-    # 스크롤 콜백: 확대/축소 (zoom)
-    def scroll_callback(window, xoffset, yoffset):
-        nonlocal cam
-        zoom_sensitivity = 0.1
-        cam.distance -= yoffset * zoom_sensitivity
-        if cam.distance < 0.1:
-            cam.distance = 0.1
-    glfw.set_scroll_callback(window, scroll_callback)
-
-    # 키보드 콜백: 스페이스, F, C 키 처리
-    def key_callback(window, key, scancode, action, mods):
-        nonlocal paused, opt
-        if action == glfw.PRESS:
-            if key == glfw.KEY_SPACE:
-                paused = not paused
-                print("Paused" if paused else "Resumed")
-            elif key == glfw.KEY_F:
-                current = opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE]
-                opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE] = 0 if current else 1
-                print("Contact force visualization:", opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE])
-            elif key == glfw.KEY_C:
-                current = opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT]
-                opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = 0 if current else 1
-                print("Contact point visualization:", opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT])
-    glfw.set_key_callback(window, key_callback)
-
-    print("학습된 모델 테스트 시작 - 창을 닫을 때까지 시뮬레이션이 실행됩니다.")
-    while not glfw.window_should_close(window):
-        glfw.poll_events()
-        if not paused:
-            action, _ = model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, info = env.step(action)
-            if terminated or truncated:
-                obs, _ = env.reset()
-
-        mujoco.mjv_updateScene(env.model, env.data, opt, None, cam,
-                               mujoco.mjtCatBit.mjCAT_ALL.value, scene)
-        viewport_width, viewport_height = glfw.get_framebuffer_size(window)
-        gl.glViewport(0, 0, viewport_width, viewport_height)
-        gl.glClearColor(0.6, 0.6, 0.6, 1)
-        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
-        mujoco.mjr_render(mujoco.MjrRect(0, 0, viewport_width, viewport_height),
-                          scene, context)
-        glfw.swap_buffers(window)
-
-    glfw.terminate()
-    print("학습된 모델 테스트를 종료합니다.")
+        # ---- MATLAB(.mat) 저장 ----
+        sio.savemat("log_data.mat", {
+            "time":    np.array(t_log),
+            "wn":      np.array(wn_log),
+            "zeta":    np.array(zeta_log),
+            "k":       np.array(k_log),
+            "Fz":      np.array(Fz_log),
+            "x":       np.array(x_log),
+            "z":       np.array(z_log),
+            "xdot":    np.array(xdot_log),
+            "zdot":    np.array(zdot_log),
+            "z_body":  np.array(z_body_log),
+            "zd_body": np.array(zd_body_log),
+        })
+        print("[mat] saved: log_data.mat")
 
 if __name__ == "__main__":
-    # 명령줄 인수를 통해 모델 파일명을 입력받습니다.
-    if len(sys.argv) > 1:
-        model_name = sys.argv[1]
-    else:
-        model_name = "PPO_50000_steps.zip"  # 기본 모델 이름
-    model_path = os.path.join("models", model_name)
-    test_trained_model_manual_camera(model_path)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("model_name", type=str,
+                        help="Model file (e.g., PPO_2000000_steps or PPO_2000000_steps.zip)")
+    args = parser.parse_args()
+    run(args.model_name)

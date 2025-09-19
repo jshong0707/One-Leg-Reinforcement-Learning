@@ -125,7 +125,7 @@ class TrainPPO:
             seed=2
         )
 
-        total_timesteps = 10000000
+        total_timesteps = 2000000
 
         checkpoint_callback = CheckpointCallback(
             save_freq=50000,
