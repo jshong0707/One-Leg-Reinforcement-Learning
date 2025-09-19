@@ -3,5 +3,6 @@ CMakeFiles/
 data/
 .vscode/
 __pycache__/
+models/
 
 *.o
