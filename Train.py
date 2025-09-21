@@ -1,164 +1,152 @@
-#!/usr/bin/env python
-import sys
-import argparse
 import os
+os.environ.setdefault("MUJOCO_GL", "glfw")  
+
+import argparse
 import numpy as np
-import scipy.io as sio
-import matplotlib
-matplotlib.use("Agg")  # Non-GUI backend
-import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback, CallbackList
+
 from Env import OneLegEnv
 
+
+def save_env_stats(env: OneLegEnv, path: str):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    np.savez(path, mean=env.obs_mean, var=env.obs_var, alpha=env.alpha)
+
+def load_env_stats(env: OneLegEnv, path: str):
+    if os.path.exists(path):
+        z = np.load(path, allow_pickle=True)
+        env.obs_mean = z["mean"].astype(np.float32)
+        env.obs_var  = z["var"].astype(np.float32)
+        env.alpha    = float(z["alpha"])
+        print(f"[EnvStats] loaded: {path}")
+    else:
+        print(f"[EnvStats] not found (fresh stats): {path}")
+
+
 class LoggingCallback(BaseCallback):
-    """
-    사용자 정의 콜백:
-    - 에피소드가 끝날 때마다 누적 reward를 기록합니다.
-    - 각 rollout 종료 시 PPO 내부 logger에서 (global timestep과 함께)
-      'train/loss', 'train/policy_gradient_loss', 'train/value_loss',
-      'train/approx_kl', 'train/clip_fraction', 'train/entropy_loss',
-      'train/explained_variance' 등의 metric들을 기록합니다.
-    - 학습 종료 시 기록된 데이터를 "data/training_logs.mat" 파일로 저장합니다.
-    """
     def __init__(self, verbose=0):
-        super(LoggingCallback, self).__init__(verbose)
-        self.episode_rewards = []      # list of (global timestep, episode reward)
-        self.total_losses = []         # list of (global timestep, total loss)
-        self.policy_grad_losses = []   # list of (global timestep, policy gradient loss)
-        self.value_losses = []         # list of (global timestep, value loss)
-        self.approx_kls = []           # list of (global timestep, approx KL)
-        self.clip_fractions = []       # list of (global timestep, clip fraction)
-        self.entropy_losses = []       # list of (global timestep, entropy loss)
-        self.explained_variances = []  # list of (global timestep, explained variance)
+        super().__init__(verbose)
+        self.episode_rewards = []
 
     def _on_step(self) -> bool:
-        infos = self.locals.get("infos", [])
-        for info in infos:
+        # SB3 Gymnasium 호환: info 안에 'episode' 키가 있을 때 에피소드 종료 누적 보상 접근
+        for info in self.locals.get("infos", []):
             if "episode" in info:
                 self.episode_rewards.append((self.model.num_timesteps, info["episode"]["r"]))
         return True
 
-    def _on_rollout_end(self) -> None:
-        current_timestep = self.model.num_timesteps
-        # PPO의 내부 logger에서 metric들을 가져옵니다.
-        metrics = getattr(self.model.logger, "name_to_value", {})
-        if "train/loss" in metrics:
-            self.total_losses.append((current_timestep, metrics["train/loss"]))
-        if "train/policy_gradient_loss" in metrics:
-            self.policy_grad_losses.append((current_timestep, metrics["train/policy_gradient_loss"]))
-        if "train/value_loss" in metrics:
-            self.value_losses.append((current_timestep, metrics["train/value_loss"]))
-        if "train/approx_kl" in metrics:
-            self.approx_kls.append((current_timestep, metrics["train/approx_kl"]))
-        if "train/clip_fraction" in metrics:
-            self.clip_fractions.append((current_timestep, metrics["train/clip_fraction"]))
-        if "train/entropy_loss" in metrics:
-            self.entropy_losses.append((current_timestep, metrics["train/entropy_loss"]))
-        if "train/explained_variance" in metrics:
-            self.explained_variances.append((current_timestep, metrics["train/explained_variance"]))
+# -------------------------
+# 체크포인트 경로 해석
+# -------------------------
+def resolve_model_path(name_or_path: str) -> str:
+    """
+    - 'PPO_1000000_steps' => './models/PPO_1000000_steps.zip' 탐색
+    - 'models/PPO_1000000_steps.zip' 같이 직접 경로도 허용
+    """
+    cands = []
+    if name_or_path:
+        cands += [name_or_path]
+        if not name_or_path.endswith(".zip"):
+            cands += [name_or_path + ".zip"]
+        base = os.path.join("models", name_or_path)
+        cands += [base, base + ".zip"]
 
-    def _on_training_end(self) -> None:
-        log_data = {
-            "Episode_rewards": np.array(self.episode_rewards),
-            "Total_losses": np.array(self.total_losses),
-            "Policy_grad_losses": np.array(self.policy_grad_losses),
-            "Value_losses": np.array(self.value_losses),
-            "Approx_kls": np.array(self.approx_kls),
-            "Clip_fractions": np.array(self.clip_fractions),
-            "Entropy_losses": np.array(self.entropy_losses),
-            "Explained_variances": np.array(self.explained_variances)
-        }
-        data_folder = "./data"
-        if not os.path.exists(data_folder):
-            os.makedirs(data_folder)
-        sio.savemat(os.path.join(data_folder, "training_logs.mat"), log_data)
-        if self.verbose:
-            print("Saved training logs to", data_folder)
-        
-        # 플롯 생성: 에피소드 reward, policy gradient loss, value loss 각각
-        if log_data["episode_rewards"].size > 0:
-            timesteps, rewards = log_data["episode_rewards"].T
-            plt.figure()
-            plt.plot(timesteps, rewards, marker='o', linestyle='-')
-            plt.title("Episode Rewards")
-            plt.xlabel("Global Timestep")
-            plt.ylabel("Reward")
-            plt.savefig(os.path.join(data_folder, "episode_rewards.png"))
-            plt.close()
-        if log_data["policy_grad_losses"].size > 0:
-            timesteps, pg_losses = log_data["policy_grad_losses"].T
-            plt.figure()
-            plt.plot(timesteps, pg_losses, marker='o', linestyle='-')
-            plt.title("Policy Gradient Loss")
-            plt.xlabel("Global Timestep")
-            plt.ylabel("Policy Gradient Loss")
-            plt.savefig(os.path.join(data_folder, "policy_grad_losses.png"))
-            plt.close()
-        if log_data["value_losses"].size > 0:
-            timesteps, v_losses = log_data["value_losses"].T
-            plt.figure()
-            plt.plot(timesteps, v_losses, marker='o', linestyle='-')
-            plt.title("Value Loss")
-            plt.xlabel("Global Timestep")
-            plt.ylabel("Value Loss")
-            plt.savefig(os.path.join(data_folder, "value_losses.png"))
-            plt.close()
+    for c in cands:
+        if os.path.exists(c):
+            return c
+    raise FileNotFoundError(f"Checkpoint not found among candidates: {cands}")
 
-class TrainPPO:
-    def __init__(self, reset_timesteps):
-        self.reset_timesteps = reset_timesteps
+# -------------------------
+# 학습 루틴
+# -------------------------
+def train(args):
+    # 1) Env 생성
+    env = OneLegEnv("xml/scene.xml")
 
-    def run_training(self):
-        env = OneLegEnv("xml/scene.xml")
+    # 2) 이어학습이면 env 정규화 상태 복원 (선택)
+    env_stats_path = os.path.join("data", "env_stats.npz")
+    if args.continue_training:
+        load_env_stats(env, env_stats_path)
 
+    # 3) 모델 생성/로드
+    if args.continue_training:
+        # 기존 체크포인트에서 이어학습
+        if not args.model_name:
+            raise ValueError("이어학습에는 체크포인트 이름/경로가 필요합니다. 예: "
+                             "python train_ppo.py PPO_1000000_steps --continue-training")
+        ckpt_path = resolve_model_path(args.model_name)
+        print(f"[LOAD] {ckpt_path}")
+        model = PPO.load(ckpt_path, env=env, device=args.device, print_system_info=True)
+        reset_num_timesteps = False
+    else:
+        # 처음부터 학습
         model = PPO(
             policy="MlpPolicy",
             env=env,
             verbose=1,
-            device = "cpu",
+            device=args.device,
             learning_rate=3e-4,
             n_steps=4096,
             batch_size=256,
             n_epochs=10,
             gamma=0.99,
-            seed=2
+            seed=2,
         )
+        reset_num_timesteps = True
 
-        total_timesteps = 2000000
-
-        checkpoint_callback = CheckpointCallback(
-            save_freq=50000,
-            save_path='./models/',
-            name_prefix='PPO'
-        )
-
-        logging_callback = LoggingCallback(verbose=1)
-
-        callback = CallbackList([checkpoint_callback, logging_callback])
-
-        model.learn(total_timesteps=total_timesteps,
-                    reset_num_timesteps=self.reset_timesteps,
-                    callback=callback)
-        model.save("oneleg_ppo_model")
-        print("Model saved as oneleg_ppo_model.zip")
-
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Train PPO on Walker2DEnv with optional timestep reset.")
-    parser.add_argument(
-        "--continue-training",
-        action="store_true",
-        help="If continuing training from an existing model, do not reset num_timesteps."
+    # 4) 콜백: 체크포인트 + 로깅
+    checkpoint_callback = CheckpointCallback(
+        save_freq=args.save_freq,
+        save_path=args.save_dir,
+        name_prefix="PPO"
     )
+    logging_callback = LoggingCallback(verbose=1)
+    callback = CallbackList([checkpoint_callback, logging_callback])
+
+    # 5) 학습
+    model.learn(
+        total_timesteps=args.total_timesteps,
+        reset_num_timesteps=reset_num_timesteps,
+        callback=callback
+    )
+
+    # 6) 마지막 모델 저장 + env 정규화 상태 저장
+    os.makedirs("models", exist_ok=True)
+    final_path = os.path.join("models", "continue_training_model")
+    model.save(final_path)
+    print(f"[SAVE] final model → {final_path}.zip")
+
+    # Env stats 저장(선택)
+    save_env_stats(env, env_stats_path)
+    print(f"[SAVE] env stats → {env_stats_path}")
+
+# -------------------------
+# CLI
+# -------------------------
+def main():
+    parser = argparse.ArgumentParser(description="Train/Continue PPO on OneLegEnv")
+    parser.add_argument(
+        "model_name", nargs="?", default=None,
+        help="이어학습할 체크포인트 이름 또는 경로 (예: PPO_1000000_steps 또는 models/PPO_1000000_steps.zip)"
+    )
+    parser.add_argument(
+        "--continue-training", action="store_true",
+        help="기존 체크포인트에서 이어학습"
+    )
+    parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"],
+                        help="PPO 네트워크 연산 장치 (물리 시뮬은 CPU, NN은 GPU 사용 가능)")
+    parser.add_argument("--total-timesteps", type=int, default=10_000_000,
+                        help="이번 run 에서 추가로 학습할 총 timesteps")
+    parser.add_argument("--save-freq", type=int, default=200_000,
+                        help="체크포인트 저장 간격 (timesteps)")
+    parser.add_argument("--save-dir", type=str, default="./models/",
+                        help="체크포인트 저장 폴더")
     args = parser.parse_args()
-    train_instance = TrainPPO(reset_timesteps=not args.continue_training)
-    train_instance.run_training()
+    train(args)
 
 if __name__ == "__main__":
     main()
 
 
-# 이어서 학습하는 코드 =  python PPO_1000000_steps --continue-training
-
+# resume training : python Train.py PPO_1000000_steps --continue-training

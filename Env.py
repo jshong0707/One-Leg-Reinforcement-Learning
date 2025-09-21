@@ -24,9 +24,10 @@ class OneLegEnv(gym.Env):
     Z_DES = -0.48
 
     # 행동 -> 파라미터 범위 (필요시 조정)
-    WN_MIN, WN_MAX = 5.0, 80.0         # rad/s
-    ZETA_MIN, ZETA_MAX = 0.2, 2.0      # -
-    K_MIN, K_MAX = 10.0, 3000.0        # 단위는 impl.에 따름
+    WN_MIN, WN_MAX = 5.0, 40.0         # rad/s
+    # ZETA_MIN, ZETA_MAX = 0.2, 2.0      # -
+    ZETA_MIN, ZETA_MAX = 1.0, 1.0      # -
+    K_MIN, K_MAX = 50.0, 200.0        # 
 
     # 보상 가중치
     W_X = 5.0
@@ -61,7 +62,7 @@ class OneLegEnv(gym.Env):
         self.obs_var  = np.ones(self.observation_space.shape[0],  dtype=np.float32)
 
         # Episode state
-        self.max_time = 10.0
+        self.max_time = 3.0
         self.elapsed_time = 0.0
 
         # Targets
@@ -74,13 +75,26 @@ class OneLegEnv(gym.Env):
         # a in [-1,1] -> [lo,hi]
         return lo + 0.5 * (a + 1.0) * (hi - lo)
 
+    @staticmethod
+    def _log_affine(a, lo, hi):
+        # lo, hi > 0 이어야 함 (주파수, 강성 등은 양수 범위)
+        log_lo, log_hi = np.log(lo), np.log(hi)
+        t = 0.5 * (a + 1.0)  # [-1,1] -> [0,1]
+        return float(np.exp(log_lo + t * (log_hi - log_lo)))
+
+    # --------------- 액션 -> (omega_n, zeta, k) 매핑 ---------------
     def _map_action_to_params(self, action):
         a = np.asarray(action, dtype=float)
-        wn   = self._affine(a[0], self.WN_MIN,   self.WN_MAX)
-        zeta = self._affine(a[1], self.ZETA_MIN, self.ZETA_MAX)
-        k    = self._affine(a[2], self.K_MIN,    self.K_MAX)
-        return float(wn), float(zeta), float(k)
 
+        # 로그 매핑: omega_n, k
+        wn   = self._log_affine(a[0], self.WN_MIN, self.WN_MAX)
+        k    = self._log_affine(a[2], self.K_MIN,  self.K_MAX)
+
+        # 선형 매핑: zeta (범위가 좁고 절대 변화가 중요)
+        zeta = self._affine(a[1], self.ZETA_MIN, self.ZETA_MAX)
+
+        return wn, zeta, k
+    
     # --------------- 유틸: 접촉에서 Fz 합산 ---------------
     def get_Fz(self):
         Fz = 0.0
@@ -156,9 +170,10 @@ class OneLegEnv(gym.Env):
         w_x, w_xd, w_tau, w_Fz = self.W_X, self.W_XDOT, self.W_TAU, self.W_FZ
         alive = self.ALIVE_BONUS
         cost = (w_x * float(np.dot(e_x, e_x))
-                + w_xd * float(np.dot(xdot, xdot))
+                # + w_xd * float(np.dot(xdot, xdot))
                 + w_tau * (tau0_cmd**2 + tau1_cmd**2)
                 + w_Fz * (Fz**2))
+        
         reward = -cost + alive
 
         # 9) 종료 조건
@@ -166,7 +181,12 @@ class OneLegEnv(gym.Env):
         terminated = False
         if z_height < 0.1:
             terminated = True
-            reward -= 50.0
+            reward -= 300.0
+
+        if Fz > 150:
+            terminated = True
+            reward -= 300.0
+
 
         truncated = False
         if self.elapsed_time >= self.max_time:
@@ -177,6 +197,7 @@ class OneLegEnv(gym.Env):
             "Fz": Fz, "dz": dz,
             "e_x": np.array(e_x, dtype=float),
         }
+
         return obs_norm, float(reward), terminated, truncated, info
 
     # --------------- 리셋 ---------------
@@ -185,7 +206,7 @@ class OneLegEnv(gym.Env):
         mujoco.mj_resetData(self.model, self.data)
 
         # 원하는 초기 포즈: z, q0_abs, q1_abs
-        z0 = 0.7 + np.random.uniform(-0.05, 0.5)
+        z0 = 0.7 + 0.5#+ np.random.uniform(-0.05, 0.5)
         L = self.ARM_LEN
         # z_des 기반 대칭 초기자세 (예시)
         th = np.arccos(np.clip(-self.z_des/(2*L), -1.0, 1.0))

@@ -78,7 +78,7 @@ PYBIND11_MODULE(ctrlbind, m) {
 
               // 4) 조인트 토크로 변환
               Eigen::Vector2d tau = J.transpose() * f;
-
+            
               return py::make_tuple(tau, e);
           },
           py::arg("controller"),

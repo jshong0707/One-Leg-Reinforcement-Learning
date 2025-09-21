@@ -13,7 +13,7 @@ import scipy.io as sio  # MATLAB .mat 저장
 
 # ----------------- 플로팅 함수 -----------------
 def plot_params(time, wn, zeta, kval, Fz, z_body, zd_body,
-                out_path="params_timeseries.png"):
+                out_path="data/params_timeseries.png"):
     fig, axs = plt.subplots(6, 1, figsize=(10, 12), sharex=True)
     axs[0].plot(time, wn);      axs[0].set_ylabel(r"$\omega_n$ [rad/s]")
     axs[1].plot(time, zeta);    axs[1].set_ylabel(r"$\zeta$")
@@ -27,7 +27,7 @@ def plot_params(time, wn, zeta, kval, Fz, z_body, zd_body,
     plt.savefig(out_path, dpi=150)
     plt.close(fig)
 
-def plot_ee(time, xdot, zdot, x, z, out_path="ee_timeseries.png"):
+def plot_ee(time, xdot, zdot, x, z, out_path="data/ee_timeseries.png"):
     fig, axs = plt.subplots(4, 1, figsize=(10, 8), sharex=True)
     axs[0].plot(time, xdot);  axs[0].set_ylabel(r"$\dot{x}$")
     axs[1].plot(time, zdot);  axs[1].set_ylabel(r"$\dot{z}$")
@@ -54,6 +54,7 @@ def run(model_name: str):
     obs, _ = env.reset()
     agent = PPO.load(model_path, device="cpu")
 
+    
     # ctrlbind import (야코비안, fk_pos)
     _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
     _BUILD_DIR = os.path.join(_THIS_DIR, "build")
@@ -106,16 +107,20 @@ def run(model_name: str):
         print("Interrupted by user")
 
     finally:
+        # ---- data 디렉토리 생성 ----
+        out_dir = "data"
+        os.makedirs(out_dir, exist_ok=True)
+
         # ---- PNG 저장 ----
         plot_params(t_log, wn_log, zeta_log, k_log, Fz_log,
                     z_body_log, zd_body_log,
-                    out_path="params_timeseries.png")
+                    out_path=os.path.join(out_dir, "params_timeseries.png"))
         plot_ee(t_log, xdot_log, zdot_log, x_log, z_log,
-                out_path="ee_timeseries.png")
-        print("[plot] saved: params_timeseries.png, ee_timeseries.png")
+                out_path=os.path.join(out_dir, "ee_timeseries.png"))
+        print("[plot] saved: data/params_timeseries.png, data/ee_timeseries.png")
 
         # ---- MATLAB(.mat) 저장 ----
-        sio.savemat("log_data.mat", {
+        sio.savemat(os.path.join(out_dir, "log_data.mat"), {
             "time":    np.array(t_log),
             "wn":      np.array(wn_log),
             "zeta":    np.array(zeta_log),
@@ -128,7 +133,7 @@ def run(model_name: str):
             "z_body":  np.array(z_body_log),
             "zd_body": np.array(zd_body_log),
         })
-        print("[mat] saved: log_data.mat")
+        print("[mat] saved: data/log_data.mat")
 
 if __name__ == "__main__":
     import argparse
