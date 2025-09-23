@@ -1,7 +1,3 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-
-# --- 헤드리스 환경(GLX 없음) 대비: 필요 없으면 제거 가능 ---
 import os
 os.environ.setdefault("MUJOCO_GL", "egl")
 
@@ -65,15 +61,16 @@ def main():
     ctrl = ctrlbind.Controller()
 
     # --- 초기 자세: C++ 로직과 동일 (z_des 기반 역기구학) ---
-    z_des = -0.48
+    z_des = -0.43
     th = np.arccos(-z_des/(2*ARM_LEN))
     qm = np.pi/2 - th
     qb = np.pi/2 + th
     q0_init = qm
     q1_init = qb - qm
-    data.qpos[0] = 1.2
+    data.qpos[0] = 0.9
     data.qpos[1] = q0_init
     data.qpos[2] = q1_init
+
     mujoco.mj_forward(model, data)
 
     # --- 로깅 버퍼 (pre-step 타이밍) ---
@@ -167,6 +164,7 @@ def main():
         world_cnt += 1
 
     save_path = os.path.join("data", "maindata.mat")
+
 
     # === 메인 루프 ===
     try:

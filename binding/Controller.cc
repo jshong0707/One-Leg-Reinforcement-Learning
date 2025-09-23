@@ -98,9 +98,12 @@ struct Controller::Impl
     Vector2d PID(const Vector2d& error, const Vector2d& error_old)
     {
         //    x                z    
-        KP[0] = 5000;     KP[1] = 10000;         
-        KI[0] = 1000;      KI[1] = 1200; 
-        KD[0] = 160;       KD[1] = 160;   
+        // KP[0] = 5000;     KP[1] = 7000;         
+        // KI[0] = 1000;      KI[1] = 1200; 
+        // KD[0] = 140;       KD[1] = 140;   
+        KP[0] = 8000;      KP[1] = 8000;         
+        KI[0] = 800;       KI[1] = 800; 
+        KD[0] = 100;       KD[1] = 100;   
 
             
 

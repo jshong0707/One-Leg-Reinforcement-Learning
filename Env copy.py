@@ -25,16 +25,16 @@ class OneLegEnv(gym.Env):
 
     # 행동 -> 파라미터 범위 (필요시 조정)
     WN_MIN, WN_MAX = 5.0, 40.0         # rad/s
-    ZETA_MIN, ZETA_MAX = 0.2, 2.0      # -
-    # ZETA_MIN, ZETA_MAX = 1.0, 1.0      # -
-    K_MIN, K_MAX = 100, 300.0        # 
+    # ZETA_MIN, ZETA_MAX = 0.2, 2.0      # -
+    ZETA_MIN, ZETA_MAX = 1.0, 1.0      # -
+    K_MIN, K_MAX = 50.0, 200.0        # 
 
     # 보상 가중치
     W_X = 5.0
     W_XDOT = 0.01
     W_TAU = 0.001
     W_FZ = 10
-    ALIVE_BONUS = 1
+    ALIVE_BONUS = 0.5
 
     def __init__(self, xml_file="xml/scene.xml"):
         super().__init__()
@@ -47,30 +47,30 @@ class OneLegEnv(gym.Env):
     #! Binding
         self.ctrl = ctrlbind.Controller()
         self.e_old = np.zeros(2, dtype=float)  # task-space error buffer
+        self.fsm = ctrlbind.FSM()
+        self.traj = ctrlbind.Trajectory(self.fsm)
+
         
-        # Action: (omega_n, zeta, k)
+    #! Define Action space (omega_n, zeta, k)
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
 
-        # Observation: len=10 (아래 _get_obs 에서 정의)
+    #! Observation: len=10 (아래 _get_obs 에서 정의)
         obs_high = np.ones(10, dtype=np.float32) * np.inf
         obs_low  = -obs_high
         self.observation_space = spaces.Box(obs_low, obs_high, dtype=np.float32)
 
-        # Obs normalization state
+        #? Obs normalization state
         self.alpha = 0.001
         self.obs_mean = np.zeros(self.observation_space.shape[0], dtype=np.float32)
         self.obs_var  = np.ones(self.observation_space.shape[0],  dtype=np.float32)
 
-        # Episode state
+        #? Episode state
         self.max_time = 3.0
         self.elapsed_time = 0.0
 
         # Targets
         self.x_des = float(self.X_DES)
         self.z_des = float(self.Z_DES)
-
-        # External Force
-        self.Fz = 0.0
 
     # --------------- 유틸: 행동 -> (omega_n, zeta, k) 매핑 ---------------
     @staticmethod
@@ -100,12 +100,12 @@ class OneLegEnv(gym.Env):
     
     # --------------- 유틸: 접촉에서 Fz 합산 ---------------
     def get_Fz(self):
-        self.Fz = 0.0
+        Fz = 0.0
 
         f = np.zeros(6, dtype=np.float64)        # cf[6] 과 동일
         mujoco.mj_contactForce(self.model, self.data, 0, f)
-        self.Fz = f[0]
-        return self.Fz
+        Fz = f[0]
+        return Fz
 
 
     # --------------- 관측 구성 ---------------
@@ -134,16 +134,26 @@ class OneLegEnv(gym.Env):
         # 1) 행동 -> admittance 파라미터
         omega_n, zeta, k = self._map_action_to_params(action)
 
-        # 2) 상태 읽기 (bi-articular)
+        # 2) Bi-articular
         q0_abs = float(self.data.qpos[1])
         q1_abs = float(self.data.qpos[1] + self.data.qpos[2])
 
     #! Controller
         #? Admittance
-        self.Fz = self.get_Fz()
-        Fz = self.Fz
+        Fz = self.get_Fz()
         dz = float(self.ctrl.admittance(omega_n, zeta, k, Fz))
-        x_ref = np.array([self.x_des, self.z_des + dz], dtype=float)
+        # x_ref = np.array([self.x_des, self.z_des + dz], dtype=float)
+        
+    #! --- contact state update ---
+        self.fsm.get_pos(ctrlbind.fk_pos(q0_abs, q1_abs, self.ARM_LEN))
+        self.traj.contact_state_update(self.model, self.data)
+
+    #! --- Trajectory ---
+        z_vel = float(self.data.qvel[0])
+        x_ref = np.array(self.traj.get_trajectory(float(self.data.time), z_vel), dtype=float)
+
+        # post-contact라면 admittance dz 더해줌
+        x_ref[1] += dz
 
         #? FK/Jacobian & Error
         # (작업공간 EE 위치)
@@ -167,18 +177,6 @@ class OneLegEnv(gym.Env):
         self.data.ctrl[0] = tau0_cmd
         self.data.ctrl[1] = tau1_cmd
 
-    #! Joint velocity limit (biarticular limit)
-        if self.data.qvel[1] > 20:
-            self.data.qvel[1] = 20
-        if self.data.qvel[1] < -20:
-            self.data.qvel[1] = -20
-
-        sum_qvel = self.data.qvel[1] + self.data.qvel[2]
-        if sum_qvel > 20:
-            self.data.qvel[2] = 20 - self.data.qvel[1]
-        if sum_qvel < -20:
-            self.data.qvel[2] = -20 - self.data.qvel[1]
-
     #! Simulation
         mujoco.mj_step(self.model, self.data)
         self.elapsed_time += self.dt
@@ -194,24 +192,10 @@ class OneLegEnv(gym.Env):
 
         w_x, w_xd, w_tau, w_Fz = self.W_X, self.W_XDOT, self.W_TAU, self.W_FZ
         alive = self.ALIVE_BONUS
-
-        pos_z = float(x[1])
-        u_z = np.clip((pos_z + 0.5) / 0.4, 0.0, 1.0)
-        u_k = np.clip((k - self.K_MIN) / (self.K_MAX - self.K_MIN), 0.0, 1.0)
-
-        gamma = 3.0   # z가 -0.1에 가까울수록 더 강하게 k↑ (2~4 사이 튜닝)
-        u_target = u_z**gamma
-    
-        W_K_ALIGN = 1.0  # 가중치 튜닝 파라미터
-        
         cost = (w_x * float(np.dot(e_x, e_x))
                 # + w_xd * float(np.dot(xdot, xdot))
                 + w_tau * (tau0_cmd**2 + tau1_cmd**2)
                 + w_Fz * (Fz**2))
-        
-        cost += W_K_ALIGN * (u_k - u_target)**2
-
-        
         reward = -cost + alive
 
         # 종료 조건
@@ -219,16 +203,11 @@ class OneLegEnv(gym.Env):
         terminated = False
         if z_height < 0.1:
             terminated = True
-            print("Terminated: Low height")
             reward -= 300.0
 
         if Fz > 200:
-            # terminated = True
-            reward -= 200.0
-
-        if x[1] > -0.1:
             terminated = True
-            reward -= 100.0
+            reward -= 300.0
 
         truncated = False
         if self.elapsed_time >= self.max_time:
@@ -240,16 +219,16 @@ class OneLegEnv(gym.Env):
             "e_x": np.array(e_x, dtype=float),
         }
 
-        # terminated = False
-
         return obs_norm, float(reward), terminated, truncated, info
     # --------------- 리셋 ---------------
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
-
+        self.fsm  = ctrlbind.FSM()
+        self.traj = ctrlbind.Trajectory(self.fsm)
+        
         # 원하는 초기 포즈: z, q0_abs, q1_abs
-        z0 = 0.9 # np.random.uniform(-0.05, 0.6)
+        z0 = 0.7 + np.random.uniform(-0.05, 0.6)
         L = self.ARM_LEN
         # z_des 기반 대칭 초기자세 (예시)
         th = np.arccos(np.clip(-self.z_des/(2*L), -1.0, 1.0))
@@ -261,8 +240,6 @@ class OneLegEnv(gym.Env):
         self.data.qpos[1] = q0_abs
         self.data.qpos[2] = (q1_abs - q0_abs)
         self.data.qvel[:] = 0.0
-        self.Fz = 0.0
-        
         mujoco.mj_forward(self.model, self.data)
 
         self.e_old = np.zeros(2, dtype=float)
